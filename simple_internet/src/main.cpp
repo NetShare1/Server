@@ -398,34 +398,21 @@ int main(int argc, char *argv[]) {
 
       const uint8_t* data = (uint8_t*)buffer;
       char* out_buf = new char[BUFSIZE];
-      uint8_t* out_data = (uint8_t*)out_buf;
 
-      hexdump(* (uint8_t**)&data, nread);
       size_t max_out{BUFSIZE};
 
       if(!BrotliEncoderCompress(11, lgwin, BROTLI_DEFAULT_MODE, size, data,
-        &max_out, out_data)) {
+        &max_out, (uint8_t*) out_buf)) {
           cerr << "Fehler komprimierung" << endl;
       }
-      do_debug("Komprimeiren abgeschlossen!\n");
-
-      hexdump(out_buf, max_out);
-      uint32_t end_size = max_out;
-
-      // Decompress
-      char* org = new char[BUFSIZE];
-      size_t org_size{BUFSIZE};
-      BrotliDecoderDecompress	(	end_size, (const uint8_t*) out_buf, &org_size, (uint8_t*) org);
-      do_debug("Decompress abgeschlossen!\n");
-      hexdump(org, org_size);
 
 
       /* write length + packet */
-      plength = htons(end_size);
+      plength = htons(max_out);
       nwrite = cwrite(net_fd, (char *)&plength, sizeof(plength));
-      nwrite = cwrite(net_fd, out_buf, end_size);
+      nwrite = cwrite(net_fd, out_buf, max_out);
       
-      do_debug("TAP2NET %lu: Written %d bytes to the network\n", tap2net, end_size);
+      do_debug("TAP2NET %lu: Written %d bytes to the network\n", tap2net, max_out);
       delete out_buf;
     }
 
@@ -446,8 +433,13 @@ int main(int argc, char *argv[]) {
       nread = read_n(net_fd, buffer, ntohs(plength));
       do_debug("NET2TAP %lu: Read %d bytes from the network\n", net2tap, nread);
 
+      char* org = new char[BUFSIZE];
+      size_t org_size{BUFSIZE};
+      BrotliDecoderDecompress	(	nread, (const uint8_t*) buffer, &org_size, (uint8_t*) org);
+
       /* now buffer[] contains a full packet or frame, write it into the tun/tap interface */ 
-      nwrite = cwrite(tap_fd, buffer, nread);
+      nwrite = cwrite(tap_fd, org, org_size);
+      delete org;
       do_debug("NET2TAP %lu: Written %d bytes to the tap interface\n", net2tap, nwrite);
     }
   }
