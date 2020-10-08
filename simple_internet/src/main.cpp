@@ -384,9 +384,9 @@ int main(int argc, char *argv[]) {
 
       tap2net++;
       do_debug("TAP2NET %lu: Read %d bytes from the tap interface\n", tap2net, nread);
+
+
       // TODO Stuff with buffer brotli for example
-      BrotliEncoderState* s = BrotliEncoderCreateInstance(NULL, NULL, NULL);
-      BrotliEncoderSetParameter(s, BROTLI_PARAM_QUALITY, (uint32_t)11);
       uint32_t lgwin = 24;
       /* Use file size to limit lgwin. */
       lgwin = BROTLI_MIN_WINDOW_BITS;
@@ -394,34 +394,30 @@ int main(int argc, char *argv[]) {
         lgwin++;
         if (lgwin == BROTLI_MAX_WINDOW_BITS) break;
       }
-      BrotliEncoderSetParameter(s, BROTLI_PARAM_LGWIN, lgwin);
-      if (nread > 0) {
-        uint32_t size_hint = nread < (1 << 30) ?
-            (uint32_t)nread : (1u << 30);
-        BrotliEncoderSetParameter(s, BROTLI_PARAM_SIZE_HINT, size_hint);
-      }
       size_t size = nread;
-      size_t new_size{0};
+
       const uint8_t* data = (uint8_t*)buffer;
       char* out_buf = new char[BUFSIZE];
       uint8_t* out_data = (uint8_t*)out_buf;
 
       hexdump(* (uint8_t**)&data, nread);
-      size_t max_out{2000};
-      for(;;) {
-        if(size > 0) cout << size << endl;
-        if(new_size > 0) cout << new_size << endl;
-        if(!BrotliEncoderCompressStream(s,
-        size <= 0 ? BROTLI_OPERATION_FINISH : BROTLI_OPERATION_PROCESS,
-        &size, &data,
-        &max_out, &out_data, &new_size)) {
-          cerr << "Fehler comprimierung" << endl;
-        }
-        if (BrotliEncoderIsFinished(s)) break;
+      size_t max_out{BUFSIZE};
+
+      if(!BrotliEncoderCompress(11, lgwin, BROTLI_DEFAULT_MODE, size, data,
+        &max_out, out_data)) {
+          cerr << "Fehler komprimierung" << endl;
       }
-      hexdump(out_data, new_size);
-      uint32_t end_size = new_size;
-      BrotliEncoderDestroyInstance(s);
+      do_debug("Komprimeiren abgeschlossen!\n");
+
+      hexdump(out_buf, max_out);
+      uint32_t end_size = max_out;
+
+      // Decompress
+      char* org = new char[BUFSIZE];
+      size_t org_size{BUFSIZE};
+      BrotliDecoderDecompress	(	end_size, (const uint8_t*) out_buf, &org_size, (uint8_t*) org);
+      do_debug("Decompress abgeschlossen!\n");
+      hexdump(org, org_size);
 
 
       /* write length + packet */
