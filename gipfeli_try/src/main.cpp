@@ -39,9 +39,10 @@
 #include <errno.h>
 #include <stdarg.h>
 #include <string>
-#include <brotli/decode.h>
-#include <brotli/encode.h>
-#include <brotli/common/constants.h>
+#include "gipfeli.h"
+#include "stubs-internal.h"
+
+
 /* buffer for reading from tun/tap interface, must be >= 1500 */
 #define BUFSIZE 2000   
 #define CLIENT 0
@@ -385,35 +386,21 @@ int main(int argc, char *argv[]) {
       tap2net++;
       do_debug("TAP2NET %lu: Read %d bytes from the tap interface\n", tap2net, nread);
 
+        string original{buffer, nread};
+        string compressed;
+        hexdump((char *) buffer, nread);
+        hexdump(original.data(), original.length());
 
-      // TODO Stuff with buffer brotli for example
-      uint32_t lgwin = 24;
-      /* Use file size to limit lgwin. */
-      lgwin = BROTLI_MIN_WINDOW_BITS;
-      while (BROTLI_MAX_BACKWARD_LIMIT(lgwin) < (uint64_t)nread) {
-        lgwin++;
-        if (lgwin == BROTLI_MAX_WINDOW_BITS) break;
-      }
-      size_t size = nread;
-
-      const uint8_t* data = (uint8_t*)buffer;
-      char* out_buf = new char[BUFSIZE];
-
-      size_t max_out{BUFSIZE};
-
-      if(!BrotliEncoderCompress(1, lgwin, BROTLI_DEFAULT_MODE, size, data,
-        &max_out, (uint8_t*) out_buf)) {
-          cerr << "Fehler komprimierung" << endl;
-      }
-
+        util::compression::Compressor* compressor =
+            util::compression::NewGipfeliCompressor();
+        size_t new_size = compressor->Compress(original, &compressed);
 
       /* write length + packet */
-      plength = htons(max_out);
+      plength = htons(new_size);
       nwrite = cwrite(net_fd, (char *)&plength, sizeof(plength));
-      nwrite = cwrite(net_fd, out_buf, max_out);
+      nwrite = cwrite(net_fd, compressed.data(), new_size);
       
-      do_debug("TAP2NET %lu: Written %d bytes to the network\n", tap2net, max_out);
-      delete out_buf;
+      do_debug("TAP2NET %lu: Written %d bytes to the network\n", tap2net, new_size);
     }
 
     if(FD_ISSET(net_fd, &rd_set)) {
@@ -433,13 +420,16 @@ int main(int argc, char *argv[]) {
       nread = read_n(net_fd, buffer, ntohs(plength));
       do_debug("NET2TAP %lu: Read %d bytes from the network\n", net2tap, nread);
 
-      char* org = new char[BUFSIZE];
-      size_t org_size{BUFSIZE};
-      BrotliDecoderDecompress	(	nread, (const uint8_t*) buffer, &org_size, (uint8_t*) org);
+      hexdump((char *) buffer, nread);
+      string original;
+      util::compression::Compressor* compressor =
+      util::compression::NewGipfeliCompressor();
+      bool success = compressor->Uncompress(string(buffer, nread), &original);
+
+      hexdump((char *) original.c_str(), original.length());
 
       /* now buffer[] contains a full packet or frame, write it into the tun/tap interface */ 
-      nwrite = cwrite(tap_fd, org, org_size);
-      delete org;
+      nwrite = cwrite(tap_fd, original.data(), original.length());
       do_debug("NET2TAP %lu: Written %d bytes to the tap interface\n", net2tap, nwrite);
     }
   }
