@@ -21,6 +21,7 @@
  *************************************************************************/ 
 // Edited by Alexander Doubrava for testing purposes
 
+#include <iostream>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -38,7 +39,9 @@
 #include <errno.h>
 #include <stdarg.h>
 #include <string>
-
+#include <brotli/decode.h>
+#include <brotli/encode.h>
+#include <brotli/common/constants.h>
 /* buffer for reading from tun/tap interface, must be >= 1500 */
 #define BUFSIZE 2000   
 #define CLIENT 0
@@ -179,6 +182,24 @@ void usage(void) {
   fprintf(stderr, "-d: outputs debug information while running\n");
   fprintf(stderr, "-h: prints this help text\n");
   exit(1);
+}
+
+void hexdump(void *ptr, int buflen) {
+  unsigned char *buf = (unsigned char*)ptr;
+  int i, j;
+  for (i=0; i<buflen; i+=16) {
+    printf("%06x: ", i);
+    for (j=0; j<16; j++) 
+      if (i+j < buflen)
+        printf("%02x ", buf[i+j]);
+      else
+        printf("   ");
+    printf(" ");
+    for (j=0; j<16; j++) 
+      if (i+j < buflen)
+        printf("%c", isprint(buf[i+j]) ? buf[i+j] : '.');
+    printf("\n");
+  }
 }
 
 int main(int argc, char *argv[]) {
@@ -342,7 +363,8 @@ int main(int argc, char *argv[]) {
     fd_set rd_set;
 
     FD_ZERO(&rd_set);
-    FD_SET(tap_fd, &rd_set); FD_SET(net_fd, &rd_set);
+    FD_SET(tap_fd, &rd_set); 
+    FD_SET(net_fd, &rd_set);
 
     ret = select(maxfd + 1, &rd_set, NULL, NULL, NULL);
 
@@ -362,13 +384,53 @@ int main(int argc, char *argv[]) {
 
       tap2net++;
       do_debug("TAP2NET %lu: Read %d bytes from the tap interface\n", tap2net, nread);
+      // TODO Stuff with buffer brotli for example
+      BrotliEncoderState* s = BrotliEncoderCreateInstance(NULL, NULL, NULL);
+      BrotliEncoderSetParameter(s, BROTLI_PARAM_QUALITY, (uint32_t)11);
+      uint32_t lgwin = 24;
+      /* Use file size to limit lgwin. */
+      lgwin = BROTLI_MIN_WINDOW_BITS;
+      while (BROTLI_MAX_BACKWARD_LIMIT(lgwin) < (uint64_t)nread) {
+        lgwin++;
+        if (lgwin == BROTLI_MAX_WINDOW_BITS) break;
+      }
+      BrotliEncoderSetParameter(s, BROTLI_PARAM_LGWIN, lgwin);
+      if (nread > 0) {
+        uint32_t size_hint = nread < (1 << 30) ?
+            (uint32_t)nread : (1u << 30);
+        BrotliEncoderSetParameter(s, BROTLI_PARAM_SIZE_HINT, size_hint);
+      }
+      size_t size = nread;
+      size_t new_size{0};
+      const uint8_t* data = (uint8_t*)buffer;
+      char* out_buf = new char[BUFSIZE];
+      uint8_t* out_data = (uint8_t*)out_buf;
+
+      hexdump(* (uint8_t**)&data, nread);
+      size_t max_out{2000};
+      for(;;) {
+        if(size > 0) cout << size << endl;
+        if(new_size > 0) cout << new_size << endl;
+        if(!BrotliEncoderCompressStream(s,
+        size <= 0 ? BROTLI_OPERATION_FINISH : BROTLI_OPERATION_PROCESS,
+        &size, &data,
+        &max_out, &out_data, &new_size)) {
+          cerr << "Fehler comprimierung" << endl;
+        }
+        if (BrotliEncoderIsFinished(s)) break;
+      }
+      hexdump(out_data, new_size);
+      uint32_t end_size = new_size;
+      BrotliEncoderDestroyInstance(s);
+
 
       /* write length + packet */
-      plength = htons(nread);
+      plength = htons(end_size);
       nwrite = cwrite(net_fd, (char *)&plength, sizeof(plength));
-      nwrite = cwrite(net_fd, buffer, nread);
+      nwrite = cwrite(net_fd, out_buf, end_size);
       
-      do_debug("TAP2NET %lu: Written %d bytes to the network\n", tap2net, nwrite);
+      do_debug("TAP2NET %lu: Written %d bytes to the network\n", tap2net, end_size);
+      delete out_buf;
     }
 
     if(FD_ISSET(net_fd, &rd_set)) {
