@@ -57,6 +57,17 @@ char *progname;
 
 using namespace std;
 
+
+void print_ip(unsigned int ip)
+{
+    unsigned char bytes[4];
+    bytes[0] = ip & 0xFF;
+    bytes[1] = (ip >> 8) & 0xFF;
+    bytes[2] = (ip >> 16) & 0xFF;
+    bytes[3] = (ip >> 24) & 0xFF;   
+    printf("%d.%d.%d.%d\n", bytes[3], bytes[2], bytes[1], bytes[0]);        
+}
+
 /**************************************************************************
  * tun_alloc: allocates or reconnects to a tun/tap device. The caller     *
  *            must reserve enough space in *dev.                          *
@@ -287,7 +298,7 @@ int main(int argc, char *argv[]) {
 
   do_debug("Successfully connected to interface %s\n", if_name);
 
-  if ( (sock_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+  if ( (sock_fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) < 0) {
     perror("socket()");
     exit(1);
   }
@@ -296,7 +307,7 @@ int main(int argc, char *argv[]) {
 
   if(cliserv == CLIENT) {
     /* Only for my VM Client */
-    char* interface = "wlp2s0";
+    char* interface = "usb0";
     setsockopt(sock_fd, SOL_SOCKET, SO_BINDTODEVICE, interface, 4 ); 
     /* Client, try to connect to server */
     /* Test with fixed IP */
@@ -308,7 +319,7 @@ int main(int argc, char *argv[]) {
     remote.sin_port = htons(port);
 
     /* connection request */
-    status = system(("route add " + string(remote_ip) + " gw 192.168.178.1 " + string(interface)).c_str());
+    status = system(("route add " + string(remote_ip) + " gw 192.168.0.1 " + string(interface)).c_str());
     if (connect(sock_fd, (struct sockaddr*) &remote, sizeof(remote)) < 0) {
       perror("connect()");
       exit(1);
@@ -343,31 +354,40 @@ int main(int argc, char *argv[]) {
       exit(1);
     }
     
+    remotelen = sizeof(remote);
+    memset(&remote, 0, remotelen);
+    net_fd = sock_fd; // That should fix it
+    /*
     if (listen(sock_fd, 5) < 0) {
       perror("listen()");
       exit(1);
     }
     
-    /* wait for connection request */
-    remotelen = sizeof(remote);
-    memset(&remote, 0, remotelen);
     if ((net_fd = accept(sock_fd, (struct sockaddr*)&remote, &remotelen)) < 0) {
       perror("accept()");
       exit(1);
     }
 
     do_debug("SERVER: Client connected from %s\n", inet_ntoa(remote.sin_addr));
+    */
   }
   
   /* use select() to handle two descriptors at once */
   maxfd = (tap_fd > net_fd)?tap_fd:net_fd;
+  int len = sizeof(sockaddr_in);
+  int port_cl = 0;
+
+  if(cliserv == CLIENT) {
+    port_cl = PORT;
+  }
 
   while(1) {
     int ret;
     fd_set rd_set;
-
+    
     FD_ZERO(&rd_set);
     FD_SET(tap_fd, &rd_set); 
+
     FD_SET(net_fd, &rd_set);
 
     ret = select(maxfd + 1, &rd_set, NULL, NULL, NULL);
@@ -381,62 +401,73 @@ int main(int argc, char *argv[]) {
       exit(1);
     }
 
-    if(FD_ISSET(tap_fd, &rd_set)) {
-      /* data from tun/tap: just read it and write it to the network */
-      
-      nread = cread(tap_fd, buffer, BUFSIZE);
-
-      tap2net++;
-      do_debug("TAP2NET %lu: Read %d bytes from the tap interface\n", tap2net, nread);
-
-
-      std::chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
-      string compressed = gzip::compress(buffer, nread);
-      std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
-
-      /* write length + packet */
-      if(compressed.length() < nread) {
-        plength = htons(compressed.length());
-        nwrite = cwrite(net_fd, (char *)&plength, sizeof(plength));
-        nwrite = cwrite(net_fd, compressed.data(), compressed.length());
-        cout << "Saved bytes send: " << nread - compressed.length() << endl;
-        std::cout << "Time difference = " << std::chrono::duration_cast<std::chrono::nanoseconds> (end - begin).count() << "[ns]" << std::endl;
-      } else {
-        plength = htons(nread);
-        nwrite = cwrite(net_fd, (char *)&plength, sizeof(plength));
-        nwrite = cwrite(net_fd, buffer, nread);
-      }
-      
-      do_debug("TAP2NET %lu: Written %d bytes to the network\n", tap2net, nwrite);
-    }
-
     if(FD_ISSET(net_fd, &rd_set)) {
+
       /* data from the network: read it, and write it to the tun/tap interface. 
        * We need to read the length first, and then the packet */
-
-      /* Read length */      
-      nread = read_n(net_fd, (char *)&plength, sizeof(plength));
-      if(nread == 0) {
-        /* ctrl-c at the other end */
-        break;
+      
+      if(port_cl == 0) {
+        nread = recvfrom(net_fd, buffer, BUFSIZE, 0, (struct sockaddr *)&remote, (socklen_t *)&len);
+        port_cl = ntohs(remote.sin_port);
+        cout << "Client Port: " << port_cl << endl;
+      } else {
+        nread = recvfrom(net_fd, buffer, BUFSIZE, MSG_WAITALL, (struct sockaddr *)&remote, (socklen_t *)&len);
       }
-
+      port_cl = ntohs(remote.sin_port);
+      
       net2tap++;
-
-      /* read packet */
-      nread = read_n(net_fd, buffer, ntohs(plength));
       do_debug("NET2TAP %lu: Read %d bytes from the network\n", net2tap, nread);
-
+      /*
       if(gzip::is_compressed(buffer, nread)) {
         string original = gzip::decompress(buffer, nread);
         nwrite = cwrite(tap_fd, original.data(), original.length());
         cout << "Saved bytes received: " << original.length() - nread << endl;
       } else {
         nwrite = cwrite(tap_fd, buffer, nread);
-      }
+      }*/
+      nwrite = cwrite(tap_fd, buffer, nread);
 
       /* now buffer[] contains a full packet or frame, write it into the tun/tap interface */ 
+      if(debug) {
+        print_ip(ntohl(remote.sin_addr.s_addr));
+        cout << ntohs(remote.sin_port) << endl;
+      }
       do_debug("NET2TAP %lu: Written %d bytes to the tap interface\n", net2tap, nwrite);
+    }
+
+
+    if(FD_ISSET(tap_fd, &rd_set) && port_cl != 0) {
+      /* data from tun/tap: just read it and write it to the network */
+      nread = cread(tap_fd, buffer, BUFSIZE);
+      tap2net++;
+      do_debug("TAP2NET %lu: Read %d bytes from the tap interface\n", tap2net, nread);
+
+      /*
+      std::chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
+      string compressed = gzip::compress(buffer, nread);
+      std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
+      */
+
+      /* write length + packet .... JETZT OHNE LENGTH*/
+      /*
+      if(compressed.length() + 2000 < nread) { // + 2000 to make it allways false
+        plength = htons(compressed.length());
+        nwrite = cwrite(net_fd, compressed.data(), compressed.length());
+        sendto(net_fd, compressed.data(), compressed.length(), 0, (const sockaddr*) &remote, sizeof(remote));
+        cout << "Saved bytes send: " << nread - compressed.length() << endl;
+        std::cout << "Time difference = " << std::chrono::duration_cast<std::chrono::nanoseconds> (end - begin).count() << "[ns]" << std::endl;
+      } else {
+        //remote.sin_port = htons(65526);
+        print_ip(ntohl(remote.sin_addr.s_addr));
+        cout << ntohs(remote.sin_port) << endl;
+        sendto(net_fd, buffer, nread, 0, (const sockaddr*) &remote, sizeof(remote));
+        /*plength = htons(nread);
+        nwrite = cwrite(net_fd, (char *)&plength, sizeof(plength));
+        nwrite = cwrite(net_fd, buffer, nread);
+      }*/
+        sendto(net_fd, buffer, nread, 0, (const sockaddr*) &remote, sizeof(remote));
+
+      do_debug("TAP2NET %lu: Written %d bytes to the network\n", tap2net, nwrite);
     }
   }
   
