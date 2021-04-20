@@ -17,11 +17,9 @@
 #include <errno.h>
 #include <stdarg.h>
 #include <string>
-#include <chrono>
+#include <utility>
 
 #define BUFSIZE 1500  
-#define CLIENT 0
-#define SERVER 1
 #define PORT 5555
 
 int debug;
@@ -45,9 +43,9 @@ int tun_alloc(char *dev, int flags) {
 
   struct ifreq ifr;
   int fd, err;
-  char *clonedev = "/dev/net/tun";
+  string clonedev = "/dev/net/tun";
 
-  if( (fd = open(clonedev , O_RDWR)) < 0 ) {
+  if( (fd = open(clonedev.data() , O_RDWR)) < 0 ) {
     perror("Opening /dev/net/tun");
     return fd;
   }
@@ -83,7 +81,7 @@ int cread(int fd, char *buf, int n){
 
   if((nread=read(fd, buf, n)) < 0){
     perror("Reading data");
-    exit(1);
+    //exit(1);
   }
   return nread;
 }
@@ -95,7 +93,7 @@ int cwrite(int fd, char *buf, int n){
 
   if((nwrite=write(fd, buf, n)) < 0){
     perror("Writing data");
-    exit(1);
+    //exit(1);
   }
   return nwrite;
 }
@@ -103,13 +101,13 @@ int cwrite(int fd, char *buf, int n){
 /**************************************************************************
  * do_debug: prints debugging stuff (doh!)                                *
  **************************************************************************/
-void do_debug(char *msg, ...){
+void do_debug(string msg, ...){
   
   va_list argp;
   
   if(debug) {
 	va_start(argp, msg);
-	vfprintf(stderr, msg, argp);
+	vfprintf(stderr, msg.data(), argp);
 	va_end(argp);
   }
 }
@@ -117,12 +115,12 @@ void do_debug(char *msg, ...){
 /**************************************************************************
  * my_err: prints custom error messages on stderr.                        *
  **************************************************************************/
-void my_err(char *msg, ...) {
+void my_err(string msg, ...) {
 
   va_list argp;
   
   va_start(argp, msg);
-  vfprintf(stderr, msg, argp);
+  vfprintf(stderr, msg.data(), argp);
   va_end(argp);
 }
 
@@ -150,12 +148,11 @@ int main(int argc, char *argv[]) {
 
   char if_name[IFNAMSIZ] = "tun0";
   int maxfd;
-  uint16_t nread, nwrite, plength;
+  uint16_t nread, nwrite;
   char buffer[BUFSIZE];
   struct sockaddr_in local, remote;
-  char remote_ip[16] = "";       
   unsigned short int port = PORT;
-  int net_fd, optval = 1;
+  int net_fd;
   socklen_t remotelen;
   unsigned long int tap2net = 0, net2tap = 0;
 
@@ -199,13 +196,13 @@ int main(int argc, char *argv[]) {
     exit(1);
   }
 
-  int status = system(("ip link set " + string(if_name) + " up").c_str());
+  system(("ip link set " + string(if_name) + " up").c_str());
 
-  status = system(("ip addr add 10.0.0.1/24 dev " + string(if_name)).c_str()); // Set IP address on tun alloc instead
+  system(("ip addr add 10.0.0.1/24 dev " + string(if_name)).c_str()); // Set IP address on tun alloc instead
 
   /* Activate NAT */
-  status = system(("iptables --table nat --append POSTROUTING --out-interface " + string("enp2s0") + " -j MASQUERADE").c_str()); // make interface changeable
-  status = system(("iptables --append FORWARD --in-interface " + string(if_name) + " -j ACCEPT && echo 1 > /proc/sys/net/ipv4/ip_forward").c_str());
+  system(("iptables --table nat --append POSTROUTING --out-interface " + string("enp2s0") + " -j MASQUERADE").c_str()); // make interface changeable
+  system(("iptables --append FORWARD --in-interface " + string(if_name) + " -j ACCEPT && echo 1 > /proc/sys/net/ipv4/ip_forward").c_str());
   
   memset(&local, 0, sizeof(local));
   local.sin_family = AF_INET;
@@ -295,7 +292,7 @@ int main(int argc, char *argv[]) {
         print_ip(ntohl(remote.sin_addr.s_addr));
         cout << ntohs(remote.sin_port) << endl;
         sendto(net_fd, buffer, nread, 0, (const sockaddr*) &remote, sizeof(remote));
-        /*plength = htons(nread);
+        //plength = htons(nread);
         nwrite = cwrite(net_fd, (char *)&plength, sizeof(plength));
         nwrite = cwrite(net_fd, buffer, nread);
       }*/
