@@ -18,6 +18,9 @@
 #include <stdarg.h>
 #include <string>
 #include <utility>
+#include <unordered_set>
+#include <memory>
+#include <algorithm>
 
 #define BUFSIZE 1500  
 #define PORT 5555
@@ -26,6 +29,13 @@ int debug;
 char *progname;
 
 using namespace std;
+
+
+struct pair_hash {
+    inline std::size_t operator()(const std::pair<sockaddr_in* ,socklen_t> & v) const {
+        return v.first->sin_addr.s_addr * 31 + v.first->sin_port;
+    }
+};
 
 
 void print_ip(unsigned int ip)
@@ -150,11 +160,12 @@ int main(int argc, char *argv[]) {
   int maxfd;
   uint16_t nread, nwrite;
   char buffer[BUFSIZE];
-  struct sockaddr_in local, remote;
+  struct sockaddr_in local;
   unsigned short int port = PORT;
   int net_fd;
-  socklen_t remotelen;
   unsigned long int tap2net = 0, net2tap = 0;
+
+  unordered_set<pair<sockaddr_in*, socklen_t>, pair_hash> endpoints{};
 
   progname = argv[0];
   
@@ -213,14 +224,10 @@ int main(int argc, char *argv[]) {
     exit(1);
   }
   
-  remotelen = sizeof(remote);
-  memset(&remote, 0, remotelen);
 
   
   /* use select() to handle two descriptors at once */
   maxfd = (tap_fd > net_fd)?tap_fd:net_fd;
-  int len = sizeof(sockaddr_in);
-  int port_cl = 0;
 
   while(1) {
     int ret;
@@ -244,8 +251,20 @@ int main(int argc, char *argv[]) {
 
     /* data from the network: read it, and write it to the tun interface. */
     if(FD_ISSET(net_fd, &rd_set)) {
-      nread = recvfrom(net_fd, buffer, BUFSIZE, MSG_WAITALL, (struct sockaddr *)&remote, (socklen_t *)&len);
-      port_cl = ntohs(remote.sin_port);
+      sockaddr_in* input = new sockaddr_in; 
+      socklen_t remotelen = sizeof(*input);
+      memset(input, 0, remotelen);
+      nread = recvfrom(net_fd, buffer, BUFSIZE, MSG_WAITALL, (struct sockaddr *)input, (socklen_t *)&remotelen);
+
+      pair<sockaddr_in*, socklen_t> empf;
+      empf.first = input;
+      empf.second = remotelen;
+
+      if (endpoints.find(empf) != endpoints.end()) {
+        delete input;
+      } else {
+        endpoints.insert(empf);
+      }
       
       net2tap++;
       do_debug("NET2TUN %lu: Read %d bytes from the network\n", net2tap, nread);
@@ -261,14 +280,14 @@ int main(int argc, char *argv[]) {
 
       /* now buffer[] contains a full packet or frame, write it into the tun interface */ 
       if(debug) {
-        print_ip(ntohl(remote.sin_addr.s_addr));
-        cout << ntohs(remote.sin_port) << endl;
+        print_ip(ntohl(input->sin_addr.s_addr));
+        cout << ntohs(input->sin_port) << endl;
       }
       do_debug("NET2TUN %lu: Written %d bytes to the tap interface\n", net2tap, nwrite);
     }
 
     /* data from tun: just read it and write it to the network */
-    if(FD_ISSET(tap_fd, &rd_set) && port_cl != 0) {
+    if(FD_ISSET(tap_fd, &rd_set) && !endpoints.empty()) {
       nread = cread(tap_fd, buffer, BUFSIZE);
       tap2net++;
       do_debug("TAP2NET %lu: Read %d bytes from the tap interface\n", tap2net, nread);
@@ -296,8 +315,17 @@ int main(int argc, char *argv[]) {
         nwrite = cwrite(net_fd, (char *)&plength, sizeof(plength));
         nwrite = cwrite(net_fd, buffer, nread);
       }*/
-        sendto(net_fd, buffer, nread, 0, (const sockaddr*) &remote, sizeof(remote));
+      
+      unsigned long r = rand() % endpoints.size(); 
+      auto it = begin(endpoints);
+      advance(it,r);
+      
+      sendto(net_fd, buffer, nread, 0, (const sockaddr*) it->first, it->second);
 
+      if(debug) {
+        print_ip(ntohl(it->first->sin_addr.s_addr));
+        cout << ntohs(it->first->sin_port) << endl;
+      }
       do_debug("TAP2NET %lu: Written %d bytes to the network\n", tap2net, nwrite);
     }
   }
